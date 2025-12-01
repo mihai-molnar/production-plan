@@ -290,7 +290,21 @@ export const Planner = () => {
                 return acc;
               }, {} as Record<string, typeof state.planItems>)
             )
-              .sort(([dateA], [dateB]) => dateA.localeCompare(dateB))
+              .sort(([dateA], [dateB]) => {
+                // Sort by EU day of week (Mon=0, Sun=6) instead of chronological date
+                const dateObjA = new Date(dateA);
+                const dateObjB = new Date(dateB);
+                const jsDayA = dateObjA.getDay();
+                const jsDayB = dateObjB.getDay();
+                const euDayA = jsDayA === 0 ? 6 : jsDayA - 1; // Convert JS day to EU day
+                const euDayB = jsDayB === 0 ? 6 : jsDayB - 1;
+
+                // If same week, sort by EU day; otherwise sort by date
+                if (euDayA !== euDayB) {
+                  return euDayA - euDayB;
+                }
+                return dateA.localeCompare(dateB);
+              })
               .map(([date, items]) => {
                 const dateObj = new Date(date);
                 const dayNames = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
