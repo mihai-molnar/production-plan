@@ -97,6 +97,9 @@ export function generateProductionPlan(state: AppState): {
     const effectiveDeadline = deadlineDate < endDate ? deadlineDate : endDate;
 
     while (remainingQuantity > 0) {
+      // DEBUG: Log iteration start
+      console.log(`[SCHEDULER] Scheduling ${getReferenceName(demand.referenceId, state)}: ${remainingQuantity.toFixed(1)} tons remaining`);
+
       // Find best line for this demand that hasn't exceeded the deadline
       const bestLine = findBestLine(
         demand.referenceId,
@@ -107,7 +110,23 @@ export function generateProductionPlan(state: AppState): {
         planItems
       );
 
+      if (bestLine) {
+        const selectedSchedule = lineSchedules.get(bestLine.lineId)!;
+        const selectedLineName = state.lines.find(l => l.id === bestLine.lineId)?.name || bestLine.lineId;
+        console.log(`[SCHEDULER] Selected ${selectedLineName}, currentDate=${selectedSchedule.currentDate.toDateString()}, cost=${bestLine.cost.toFixed(1)}`);
+      }
+
       if (!bestLine) {
+        // DEBUG: Log why we couldn't find a line
+        console.log(`[SCHEDULER DEBUG] No line found for ${getReferenceName(demand.referenceId, state)}, remaining: ${remainingQuantity.toFixed(1)} tons`);
+        console.log('[SCHEDULER DEBUG] Line schedules:');
+        for (const [lineId, schedule] of lineSchedules) {
+          const lineName = state.lines.find(l => l.id === lineId)?.name || lineId;
+          const canProduce = state.throughputs.find(t => t.lineId === lineId && t.referenceId === demand.referenceId);
+          const availableHours = getAvailableHours(schedule, lineId, state);
+          console.log(`  ${lineName}: currentDate=${schedule.currentDate.toDateString()}, endDate=${effectiveDeadline.toDateString()}, pastDeadline=${schedule.currentDate >= effectiveDeadline}, canProduce=${!!canProduce}, availableToday=${availableHours.toFixed(1)}h`);
+        }
+
         if (remainingQuantity === initialQuantity) {
           if (demand.deadline) {
             errors.push(
@@ -133,9 +152,11 @@ export function generateProductionPlan(state: AppState): {
       }
 
       const schedule = lineSchedules.get(bestLine.lineId)!;
+      const lineName = state.lines.find(l => l.id === bestLine.lineId)?.name || bestLine.lineId;
 
       // Check if we're beyond the deadline/week limit
       if (schedule.currentDate >= effectiveDeadline) {
+        console.log(`[SCHEDULER] STOPPING: ${lineName} currentDate (${schedule.currentDate.toDateString()}) >= deadline (${effectiveDeadline.toDateString()})`);
         if (demand.deadline) {
           warnings.push(
             `Cannot fit remaining ${remainingQuantity.toFixed(1)} tons of ${getReferenceName(demand.referenceId, state)}: Deadline of ${new Date(demand.deadline).toLocaleDateString()} cannot be met`
