@@ -63,11 +63,18 @@ export function generateProductionPlan(state: AppState): {
   });
 
   // Initialize line schedules with week constraint
+  // Start from Monday of the current week (EU week system)
   const startDate = new Date();
   startDate.setHours(0, 0, 0, 0);
 
+  // Get the current day (0=Sunday, 1=Monday, ..., 6=Saturday)
+  const currentDay = startDate.getDay();
+  // Calculate days to subtract to get to Monday
+  const daysToMonday = currentDay === 0 ? 6 : currentDay - 1; // If Sunday, go back 6 days; else go back (day - 1)
+  startDate.setDate(startDate.getDate() - daysToMonday);
+
   const endDate = new Date(startDate);
-  endDate.setDate(endDate.getDate() + 7); // One week limit
+  endDate.setDate(endDate.getDate() + 7); // One week limit (Monday to Sunday)
 
   const lineSchedules: Map<string, LineSchedule> = new Map();
   state.lines.forEach((line) => {
