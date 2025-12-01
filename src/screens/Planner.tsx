@@ -393,7 +393,18 @@ export const Planner = () => {
                   <tr className="border-b border-purple-200">
                     <th className="text-left py-2 px-3 font-semibold text-purple-800">Line</th>
                     {(() => {
-                      const uniqueDates = Array.from(new Set(state.planItems.map((p) => p.date))).sort();
+                      const uniqueDates = Array.from(new Set(state.planItems.map((p) => p.date))).sort((a, b) => {
+                        const dateA = new Date(a);
+                        const dateB = new Date(b);
+                        const jsDayA = dateA.getDay();
+                        const jsDayB = dateB.getDay();
+                        const euDayA = jsDayA === 0 ? 6 : jsDayA - 1;
+                        const euDayB = jsDayB === 0 ? 6 : jsDayB - 1;
+                        // Sort by EU week day (Mon=0, Sun=6)
+                        if (euDayA !== euDayB) return euDayA - euDayB;
+                        // If same day of week, sort chronologically
+                        return a.localeCompare(b);
+                      });
                       return uniqueDates.map((date) => {
                         const dateObj = new Date(date);
                         const dayNames = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
@@ -411,7 +422,17 @@ export const Planner = () => {
                 </thead>
                 <tbody>
                   {state.lines.map((line) => {
-                    const uniqueDates = Array.from(new Set(state.planItems.map((p) => p.date))).sort();
+                    const uniqueDates = Array.from(new Set(state.planItems.map((p) => p.date))).sort((a, b) => {
+                      const dateA = new Date(a);
+                      const dateB = new Date(b);
+                      const jsDayA = dateA.getDay();
+                      const jsDayB = dateB.getDay();
+                      const euDayA = jsDayA === 0 ? 6 : jsDayA - 1;
+                      const euDayB = jsDayB === 0 ? 6 : jsDayB - 1;
+                      // Sort by EU week day (Mon=0, Sun=6)
+                      if (euDayA !== euDayB) return euDayA - euDayB;
+                      return a.localeCompare(b);
+                    });
                     return (
                       <tr key={line.id} className="border-b border-purple-100">
                         <td className="py-2 px-3 font-medium text-purple-900">{line.name}</td>

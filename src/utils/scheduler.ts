@@ -74,7 +74,10 @@ export function generateProductionPlan(state: AppState): {
   startDate.setDate(startDate.getDate() - daysToMonday);
 
   const endDate = new Date(startDate);
-  endDate.setDate(endDate.getDate() + 7); // One week limit (Monday to Sunday)
+  endDate.setDate(endDate.getDate() + 6); // 6 days from Monday = Sunday
+  endDate.setHours(23, 59, 59, 999); // Include the full Sunday
+
+  console.log(`[SCHEDULER] Planning week: ${startDate.toDateString()} to ${endDate.toDateString()}`);
 
   const lineSchedules: Map<string, LineSchedule> = new Map();
   state.lines.forEach((line) => {
@@ -217,21 +220,15 @@ export function generateProductionPlan(state: AppState): {
       );
 
       if (availableHours <= 0) {
-        // Move to next day
+        // No capacity left on this line today - advance to next day
         schedule.currentDate.setDate(schedule.currentDate.getDate() + 1);
         schedule.currentHour = 0;
 
         // Check if we've exceeded the deadline/week
-        if (schedule.currentDate >= effectiveDeadline) {
-          if (demand.deadline) {
-            warnings.push(
-              `Cannot fit remaining ${remainingQuantity.toFixed(1)} tons of ${getReferenceName(demand.referenceId, state)}: Deadline of ${new Date(demand.deadline).toLocaleDateString()} cannot be met`
-            );
-          } else {
-            warnings.push(
-              `Cannot fit remaining ${remainingQuantity.toFixed(1)} tons of ${getReferenceName(demand.referenceId, state)}: Week capacity exhausted`
-            );
-          }
+        if (schedule.currentDate > effectiveDeadline) {
+          // This line is exhausted, but don't give up yet - try to find another line
+          console.log(`[SCHEDULER] ${lineName} exhausted, trying other lines for remaining ${remainingQuantity.toFixed(1)} tons`);
+          // Break from this line's attempt and findBestLine will try other lines
           break;
         }
         continue;
@@ -271,16 +268,9 @@ export function generateProductionPlan(state: AppState): {
         schedule.currentHour = 0;
 
         // Check if we've exceeded the deadline/week
-        if (schedule.currentDate >= effectiveDeadline) {
-          if (demand.deadline) {
-            warnings.push(
-              `Cannot fit remaining ${remainingQuantity.toFixed(1)} tons of ${getReferenceName(demand.referenceId, state)}: Deadline of ${new Date(demand.deadline).toLocaleDateString()} cannot be met`
-            );
-          } else {
-            warnings.push(
-              `Cannot fit remaining ${remainingQuantity.toFixed(1)} tons of ${getReferenceName(demand.referenceId, state)}: Week capacity exhausted`
-            );
-          }
+        if (schedule.currentDate > effectiveDeadline) {
+          // This line is exhausted, try another line
+          console.log(`[SCHEDULER] ${lineName} exhausted (no quantity scheduled), trying other lines`);
           break;
         }
       }
@@ -295,7 +285,7 @@ function findBestLine(
   quantity: number,
   lineSchedules: Map<string, LineSchedule>,
   state: AppState,
-  endDate: Date,
+  effectiveDeadline: Date,
   planItems: PlanItem[]
 ): { lineId: string; cost: number } | null {
   let bestLine: { lineId: string; cost: number } | null = null;
@@ -309,14 +299,14 @@ function findBestLine(
   let existingLineHasCapacity = false;
   if (existingLine) {
     const existingSchedule = lineSchedules.get(existingLine);
-    if (existingSchedule && existingSchedule.currentDate < endDate) {
+    if (existingSchedule && existingSchedule.currentDate <= effectiveDeadline) {
       // Calculate TOTAL remaining capacity on existing line (not just today)
       const totalCapacityLeft = Array.from(
         { length: 7 },
         (_, dayIndex) => {
           const checkDate = new Date(existingSchedule.currentDate);
           checkDate.setDate(checkDate.getDate() + dayIndex);
-          if (checkDate >= endDate) return 0;
+          if (checkDate > effectiveDeadline) return 0;
 
           const jsDayOfWeek = checkDate.getDay();
           const dayOfWeek = jsDayOfWeek === 0 ? 6 : jsDayOfWeek - 1;
@@ -325,7 +315,7 @@ function findBestLine(
           );
           if (!availability) return 0;
 
-          const dateKey = checkDate.toISOString().split('T')[0];
+          const dateKey = getDateKey(checkDate);
           const usedHours = existingSchedule.dailyHoursUsed.get(dateKey) || 0;
           return Math.max(0, availability.hoursAvailable - usedHours);
         }
@@ -336,32 +326,61 @@ function findBestLine(
   }
 
   for (const [lineId, schedule] of lineSchedules) {
-    // Skip lines that have exceeded the deadline
-    if (schedule.currentDate >= endDate) {
-      console.log(`[SCHEDULER] Skipping ${state.lines.find(l => l.id === lineId)?.name}: currentDate (${schedule.currentDate.toDateString()}) >= endDate (${endDate.toDateString()})`);
-      continue;
-    }
-
     const throughput = state.throughputs.find(
       (t) => t.lineId === lineId && t.referenceId === referenceId
     );
 
     if (!throughput) continue; // Line cannot produce this reference
 
+    // Calculate total remaining capacity across all remaining days until the effective deadline
+    let totalRemainingCapacity = 0;
+    const tempDate = new Date(schedule.currentDate);
+
+    // Check capacity until the effective deadline for this demand
+    while (tempDate <= effectiveDeadline) {
+      const jsDayOfWeek = tempDate.getDay();
+      const dayOfWeek = jsDayOfWeek === 0 ? 6 : jsDayOfWeek - 1;
+      const availability = state.availabilities.find(
+        (a) => a.lineId === lineId && a.dayOfWeek === dayOfWeek
+      );
+
+      if (availability) {
+        const dateKey = getDateKey(tempDate);
+        const usedHours = schedule.dailyHoursUsed.get(dateKey) || 0;
+        totalRemainingCapacity += Math.max(0, availability.hoursAvailable - usedHours);
+      }
+
+      tempDate.setDate(tempDate.getDate() + 1);
+    }
+
+    // Skip lines with NO remaining capacity before the deadline
+    if (totalRemainingCapacity <= 0) {
+      console.log(`[SCHEDULER] Skipping ${state.lines.find(l => l.id === lineId)?.name}: No remaining capacity before deadline`);
+      continue;
+    }
+
     const productionTime = quantity / throughput.rate;
     let setupTime = 0;
     let setupPenalty = 0;
 
-    // STRONG preference for line already running this reference
-    // BUT only if that line still has reasonable capacity
+    // Priority system (lower cost = better):
+    // 1. Highest throughput (most important - we want fastest line)
+    // 2. Minimize setup changes (continue on same line if possible)
+    // 3. Avoid splitting references across lines if existing line has capacity
+
+    // Throughput is PRIMARY factor - strongly prefer faster lines
+    // Negative because we want to MINIMIZE cost (higher throughput = lower cost)
+    const throughputScore = -throughput.rate * 1000;
+
+    // Setup penalty: prefer lines already running this reference
     if (existingLine === lineId) {
-      // Calculate how much capacity is left on this line
+      // Calculate how much capacity is left on this line before the deadline
       const totalCapacityLeft = Array.from(
         { length: 7 },
         (_, dayIndex) => {
           const checkDate = new Date(schedule.currentDate);
           checkDate.setDate(checkDate.getDate() + dayIndex);
-          if (checkDate >= endDate) return 0;
+          if (checkDate > effectiveDeadline) return 0;
 
           const jsDayOfWeek = checkDate.getDay();
           const dayOfWeek = jsDayOfWeek === 0 ? 6 : jsDayOfWeek - 1;
@@ -370,36 +389,31 @@ function findBestLine(
           );
           if (!availability) return 0;
 
-          const usedHours = schedule.dailyHoursUsed.get(checkDate.toISOString().split('T')[0]) || 0;
+          const checkDateKey = getDateKey(checkDate);
+          const usedHours = schedule.dailyHoursUsed.get(checkDateKey) || 0;
           return Math.max(0, availability.hoursAvailable - usedHours);
         }
       ).reduce((sum, hours) => sum + hours, 0);
 
-      // Only give big bonus if there's substantial capacity left (more than 24 hours)
-      if (totalCapacityLeft > 24) {
-        setupPenalty = -500; // HUGE bonus for continuing on existing line
+      // Moderate bonus for continuing on same line (if it has capacity)
+      if (totalCapacityLeft > 1) {
+        setupPenalty = -100; // Bonus for continuing on existing line
       } else {
-        setupPenalty = 0; // No bonus if line is almost exhausted
+        setupPenalty = 0; // No bonus if line is exhausted
       }
     } else if (existingLine && existingLine !== lineId && existingLineHasCapacity) {
-      // Only penalize splitting if the existing line still has capacity
-      // If existing line is full, allow switching without penalty
-      setupPenalty = 50; // Small penalty - we prefer to use existing line but won't block scheduling
+      // Small penalty for splitting across lines
+      setupPenalty = 50;
     }
 
     // Check if this line would need setup time (switching from different reference)
     if (schedule.lastReferenceId && schedule.lastReferenceId !== referenceId) {
       setupTime = getSetupTime(lineId, schedule.lastReferenceId, referenceId, state);
-      setupPenalty += 50; // Small penalty for setup
+      setupPenalty += setupTime * 10; // Penalize setup time
     }
 
-    // Prefer lines with better throughput, but don't let it dominate the decision
-    // Use throughput rate directly (higher is better) scaled to be a tiebreaker
-    const throughputScore = throughput.rate * 5; // Bonus for faster lines
-
-    // Cost calculation: prioritize setup penalties, then throughput as tiebreaker
-    // Don't use productionTime directly as it makes slow lines completely uncompetitive
-    const cost = setupTime + setupPenalty - throughputScore;
+    // Cost calculation: throughput is PRIMARY, then setup considerations
+    const cost = throughputScore + setupTime + setupPenalty;
 
     // DEBUG: Log all candidate lines
     const lineName = state.lines.find(l => l.id === lineId)?.name || lineId;
@@ -439,10 +453,17 @@ function getAvailableHours(
     (a) => a.lineId === lineId && a.dayOfWeek === dayOfWeek
   );
 
+  const usedHours = schedule.dailyHoursUsed.get(dateKey) || 0;
+  const availableHrs = availability ? Math.max(0, availability.hoursAvailable - usedHours) : 0;
+
+  // Uncomment for debugging:
+  // const lineName = state.lines.find(l => l.id === lineId)?.name || lineId;
+  // const dayNames = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
+  // console.log(`[AVAILABILITY] ${lineName} on ${dayNames[dayOfWeek]} (${dateKey}): jsDay=${jsDayOfWeek}, euDay=${dayOfWeek}, configured=${availability?.hoursAvailable || 0}h, used=${usedHours.toFixed(1)}h, available=${availableHrs.toFixed(1)}h`);
+
   if (!availability) return 0; // Line not available on this day
 
-  const usedHours = schedule.dailyHoursUsed.get(dateKey) || 0;
-  return Math.max(0, availability.hoursAvailable - usedHours);
+  return availableHrs;
 }
 
 function scheduleTask(
@@ -456,19 +477,20 @@ function scheduleTask(
   endDate: Date
 ): PlanItem | null {
   // Check if we're already past the week limit
-  if (schedule.currentDate >= endDate) {
+  if (schedule.currentDate > endDate) {
     return null;
   }
 
   const availableHours = getAvailableHours(schedule, lineId, state);
 
-  if (duration > availableHours) {
-    // Task doesn't fit in remaining hours today, move to next day
+  // If line has no availability today OR task doesn't fit, move to next day
+  if (availableHours === 0 || duration > availableHours) {
+    // Move to next day and try again
     schedule.currentDate.setDate(schedule.currentDate.getDate() + 1);
     schedule.currentHour = 0;
 
     // Check if next day exceeds the week
-    if (schedule.currentDate >= endDate) {
+    if (schedule.currentDate > endDate) {
       return null;
     }
 
@@ -502,7 +524,11 @@ function scheduleTask(
 }
 
 function getDateKey(date: Date): string {
-  return date.toISOString().split('T')[0];
+  // Use local timezone to avoid UTC conversion issues
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
 }
 
 function getReferenceName(referenceId: string, state: AppState): string {

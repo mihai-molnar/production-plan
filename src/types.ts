@@ -16,7 +16,7 @@ export interface Throughput {
 
 export interface Availability {
   lineId: string;
-  dayOfWeek: number; // 0-6 (Sunday to Saturday)
+  dayOfWeek: number; // 0-6 (Monday to Sunday, EU week format)
   hoursAvailable: number; // e.g., 24, 16
 }
 
