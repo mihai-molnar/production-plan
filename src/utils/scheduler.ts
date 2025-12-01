@@ -393,10 +393,17 @@ function findBestLine(
       setupPenalty += 50; // Small penalty for setup
     }
 
-    // Prefer lines with better throughput (faster production = less time used)
-    const throughputBonus = -throughput.rate * 0.5; // Small bonus for faster lines
+    // Prefer lines with better throughput, but don't let it dominate the decision
+    // Use throughput rate directly (higher is better) scaled to be a tiebreaker
+    const throughputScore = throughput.rate * 5; // Bonus for faster lines
 
-    const cost = productionTime + setupTime + setupPenalty + throughputBonus;
+    // Cost calculation: prioritize setup penalties, then throughput as tiebreaker
+    // Don't use productionTime directly as it makes slow lines completely uncompetitive
+    const cost = setupTime + setupPenalty - throughputScore;
+
+    // DEBUG: Log all candidate lines
+    const lineName = state.lines.find(l => l.id === lineId)?.name || lineId;
+    console.log(`  [CANDIDATE] ${lineName}: cost=${cost.toFixed(1)}, prodTime=${productionTime.toFixed(1)}, setup=${setupTime.toFixed(1)}, penalty=${setupPenalty.toFixed(1)}, throughputScore=${throughputScore.toFixed(1)}`);
 
     if (!bestLine || cost < bestLine.cost) {
       bestLine = { lineId, cost };
