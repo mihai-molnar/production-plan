@@ -284,6 +284,16 @@ function findBestLine(
     .filter((p) => p.referenceId === referenceId && !p.isSetup)
     .map((p) => p.lineId)[0];
 
+  // Check if existing line still has capacity available
+  let existingLineHasCapacity = false;
+  if (existingLine) {
+    const existingSchedule = lineSchedules.get(existingLine);
+    if (existingSchedule && existingSchedule.currentDate < endDate) {
+      const availableHours = getAvailableHours(existingSchedule, existingLine, state);
+      existingLineHasCapacity = availableHours > 0;
+    }
+  }
+
   for (const [lineId, schedule] of lineSchedules) {
     // Skip lines that have exceeded the week
     if (schedule.currentDate >= endDate) continue;
@@ -301,15 +311,16 @@ function findBestLine(
     // STRONG preference for line already running this reference
     if (existingLine === lineId) {
       setupPenalty = -500; // HUGE bonus for continuing on existing line
-    } else if (existingLine && existingLine !== lineId) {
-      // Avoid splitting same reference across multiple lines unless necessary
-      setupPenalty = 300;
+    } else if (existingLine && existingLine !== lineId && existingLineHasCapacity) {
+      // Only penalize splitting if the existing line still has capacity
+      // If existing line is full, allow switching without penalty
+      setupPenalty = 50; // Small penalty - we prefer to use existing line but won't block scheduling
     }
 
     // Check if this line would need setup time (switching from different reference)
     if (schedule.lastReferenceId && schedule.lastReferenceId !== referenceId) {
       setupTime = getSetupTime(lineId, schedule.lastReferenceId, referenceId, state);
-      setupPenalty += 100; // Penalty for setup
+      setupPenalty += 50; // Small penalty for setup
     }
 
     // Prefer lines with better throughput (faster production = less time used)
