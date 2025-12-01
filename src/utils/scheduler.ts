@@ -316,8 +316,11 @@ function findBestLine(
   }
 
   for (const [lineId, schedule] of lineSchedules) {
-    // Skip lines that have exceeded the week
-    if (schedule.currentDate >= endDate) continue;
+    // Skip lines that have exceeded the deadline
+    if (schedule.currentDate >= endDate) {
+      console.log(`[SCHEDULER] Skipping ${state.lines.find(l => l.id === lineId)?.name}: currentDate (${schedule.currentDate.toDateString()}) >= endDate (${endDate.toDateString()})`);
+      continue;
+    }
 
     const throughput = state.throughputs.find(
       (t) => t.lineId === lineId && t.referenceId === referenceId
@@ -330,8 +333,34 @@ function findBestLine(
     let setupPenalty = 0;
 
     // STRONG preference for line already running this reference
+    // BUT only if that line still has reasonable capacity
     if (existingLine === lineId) {
-      setupPenalty = -500; // HUGE bonus for continuing on existing line
+      // Calculate how much capacity is left on this line
+      const totalCapacityLeft = Array.from(
+        { length: 7 },
+        (_, dayIndex) => {
+          const checkDate = new Date(schedule.currentDate);
+          checkDate.setDate(checkDate.getDate() + dayIndex);
+          if (checkDate >= endDate) return 0;
+
+          const jsDayOfWeek = checkDate.getDay();
+          const dayOfWeek = jsDayOfWeek === 0 ? 6 : jsDayOfWeek - 1;
+          const availability = state.availabilities.find(
+            (a) => a.lineId === lineId && a.dayOfWeek === dayOfWeek
+          );
+          if (!availability) return 0;
+
+          const usedHours = schedule.dailyHoursUsed.get(checkDate.toISOString().split('T')[0]) || 0;
+          return Math.max(0, availability.hoursAvailable - usedHours);
+        }
+      ).reduce((sum, hours) => sum + hours, 0);
+
+      // Only give big bonus if there's substantial capacity left (more than 24 hours)
+      if (totalCapacityLeft > 24) {
+        setupPenalty = -500; // HUGE bonus for continuing on existing line
+      } else {
+        setupPenalty = 0; // No bonus if line is almost exhausted
+      }
     } else if (existingLine && existingLine !== lineId && existingLineHasCapacity) {
       // Only penalize splitting if the existing line still has capacity
       // If existing line is full, allow switching without penalty
