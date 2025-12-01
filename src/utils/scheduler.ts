@@ -305,13 +305,33 @@ function findBestLine(
     .filter((p) => p.referenceId === referenceId && !p.isSetup)
     .map((p) => p.lineId)[0];
 
-  // Check if existing line still has capacity available
+  // Check if existing line still has substantial capacity available
   let existingLineHasCapacity = false;
   if (existingLine) {
     const existingSchedule = lineSchedules.get(existingLine);
     if (existingSchedule && existingSchedule.currentDate < endDate) {
-      const availableHours = getAvailableHours(existingSchedule, existingLine, state);
-      existingLineHasCapacity = availableHours > 0;
+      // Calculate TOTAL remaining capacity on existing line (not just today)
+      const totalCapacityLeft = Array.from(
+        { length: 7 },
+        (_, dayIndex) => {
+          const checkDate = new Date(existingSchedule.currentDate);
+          checkDate.setDate(checkDate.getDate() + dayIndex);
+          if (checkDate >= endDate) return 0;
+
+          const jsDayOfWeek = checkDate.getDay();
+          const dayOfWeek = jsDayOfWeek === 0 ? 6 : jsDayOfWeek - 1;
+          const availability = state.availabilities.find(
+            (a) => a.lineId === existingLine && a.dayOfWeek === dayOfWeek
+          );
+          if (!availability) return 0;
+
+          const dateKey = checkDate.toISOString().split('T')[0];
+          const usedHours = existingSchedule.dailyHoursUsed.get(dateKey) || 0;
+          return Math.max(0, availability.hoursAvailable - usedHours);
+        }
+      ).reduce((sum, hours) => sum + hours, 0);
+
+      existingLineHasCapacity = totalCapacityLeft > 24; // Substantial capacity = more than 1 day
     }
   }
 
