@@ -98,7 +98,7 @@ The production build will be in the `dist/` folder.
 
 ## Deployment
 
-Automatically deploys to GitHub Pages on push to `main` branch.
+Automatically deploys to GitHub Pages on push to `main` branch via GitHub Actions.
 
 Live URL: https://mihai-molnar.github.io/production-plan/
 
