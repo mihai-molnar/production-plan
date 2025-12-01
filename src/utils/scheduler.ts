@@ -254,10 +254,18 @@ function findBestLine(
       setupTime = getSetupTime(lineId, schedule.lastReferenceId, referenceId, state);
     }
 
-    // Calculate total cost including current utilization (for load balancing)
+    // Calculate total cost with strong load balancing
     const totalTimeUsed = Array.from(schedule.dailyHoursUsed.values()).reduce((sum, hours) => sum + hours, 0);
-    const loadPenalty = totalTimeUsed * 0.1; // Small penalty for heavily used lines
-    const cost = productionTime + setupTime + loadPenalty;
+
+    // Strong load balancing: heavily penalize already-used lines
+    // This ensures work is distributed evenly across all available lines
+    const loadPenalty = totalTimeUsed * 2.0; // Aggressive penalty for heavily used lines
+
+    // Check if line has capacity on current day
+    const availableToday = getAvailableHours(schedule, lineId, state);
+    const dayPenalty = availableToday === 0 ? 100 : 0; // Large penalty if line is full today
+
+    const cost = productionTime + setupTime + loadPenalty + dayPenalty;
 
     if (!bestLine || cost < bestLine.cost) {
       bestLine = { lineId, cost };
