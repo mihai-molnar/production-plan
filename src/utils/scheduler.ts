@@ -103,7 +103,8 @@ export function generateProductionPlan(state: AppState): {
         remainingQuantity,
         lineSchedules,
         state,
-        effectiveDeadline
+        effectiveDeadline,
+        planItems
       );
 
       if (!bestLine) {
@@ -273,9 +274,15 @@ function findBestLine(
   quantity: number,
   lineSchedules: Map<string, LineSchedule>,
   state: AppState,
-  endDate: Date
+  endDate: Date,
+  planItems: PlanItem[]
 ): { lineId: string; cost: number } | null {
   let bestLine: { lineId: string; cost: number } | null = null;
+
+  // Check if this reference has already been scheduled on a line
+  const existingLine = planItems
+    .filter((p) => p.referenceId === referenceId && !p.isSetup)
+    .map((p) => p.lineId)[0];
 
   for (const [lineId, schedule] of lineSchedules) {
     // Skip lines that have exceeded the week
@@ -291,25 +298,24 @@ function findBestLine(
     let setupTime = 0;
     let setupPenalty = 0;
 
-    // Check if this line would need setup time
-    if (schedule.lastReferenceId && schedule.lastReferenceId !== referenceId) {
-      setupTime = getSetupTime(lineId, schedule.lastReferenceId, referenceId, state);
-      // HUGE penalty for setup to minimize line changes and keep references on same line
-      setupPenalty = 1000; // This strongly discourages switching lines
-    } else if (schedule.lastReferenceId === referenceId) {
-      // Small bonus for continuing same reference (negative penalty)
-      setupPenalty = -50; // Prefer continuing on same line
+    // STRONG preference for line already running this reference
+    if (existingLine === lineId) {
+      setupPenalty = -500; // HUGE bonus for continuing on existing line
+    } else if (existingLine && existingLine !== lineId) {
+      // Avoid splitting same reference across multiple lines unless necessary
+      setupPenalty = 300;
     }
 
-    // Check if line has capacity on current day
-    const availableToday = getAvailableHours(schedule, lineId, state);
-    const dayPenalty = availableToday === 0 ? 200 : 0; // Large penalty if line is full today
+    // Check if this line would need setup time (switching from different reference)
+    if (schedule.lastReferenceId && schedule.lastReferenceId !== referenceId) {
+      setupTime = getSetupTime(lineId, schedule.lastReferenceId, referenceId, state);
+      setupPenalty += 100; // Penalty for setup
+    }
 
-    // Small penalty for total utilization (very light load balancing, only as tiebreaker)
-    const totalTimeUsed = Array.from(schedule.dailyHoursUsed.values()).reduce((sum, hours) => sum + hours, 0);
-    const loadPenalty = totalTimeUsed * 0.01; // Very small penalty, just for tiebreaking
+    // Prefer lines with better throughput (faster production = less time used)
+    const throughputBonus = -throughput.rate * 0.5; // Small bonus for faster lines
 
-    const cost = productionTime + setupTime + setupPenalty + dayPenalty + loadPenalty;
+    const cost = productionTime + setupTime + setupPenalty + throughputBonus;
 
     if (!bestLine || cost < bestLine.cost) {
       bestLine = { lineId, cost };
