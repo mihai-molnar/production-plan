@@ -6,6 +6,7 @@ export const Planner = () => {
   const { state, addDemand, deleteDemand, setPlanItems } = useApp();
   const [planErrors, setPlanErrors] = useState<string[]>([]);
   const [planWarnings, setPlanWarnings] = useState<string[]>([]);
+  const [showDetailedPlan, setShowDetailedPlan] = useState(false);
   const [formData, setFormData] = useState({
     referenceId: '',
     quantity: '',
@@ -514,6 +515,112 @@ export const Planner = () => {
                 {state.planItems.reduce((sum, p) => sum + p.duration, 0).toFixed(1)} hours
               </div>
             </div>
+          </div>
+
+          {/* Detailed Plan Button and Table */}
+          <div className="mt-4">
+            <button
+              onClick={() => setShowDetailedPlan(!showDetailedPlan)}
+              className="w-full bg-gray-100 hover:bg-gray-200 text-gray-800 px-4 py-2 rounded-md font-medium flex items-center justify-center gap-2"
+            >
+              {showDetailedPlan ? '▼' : '▶'} {showDetailedPlan ? 'Hide' : 'Show'} Detailed Plan by Line
+            </button>
+
+            {showDetailedPlan && (
+              <div className="mt-4 space-y-6">
+                {state.lines.map((line) => {
+                  // Get all unique dates and references for this line
+                  const linePlanItems = state.planItems.filter(
+                    (p) => p.lineId === line.id && !p.isSetup
+                  );
+
+                  if (linePlanItems.length === 0) return null;
+
+                  // Get unique dates sorted by EU week order
+                  const uniqueDates = Array.from(new Set(linePlanItems.map((p) => p.date)))
+                    .sort((a, b) => {
+                      const dateObjA = new Date(a);
+                      const dateObjB = new Date(b);
+                      const jsDayA = dateObjA.getDay();
+                      const jsDayB = dateObjB.getDay();
+                      const euDayA = jsDayA === 0 ? 6 : jsDayA - 1;
+                      const euDayB = jsDayB === 0 ? 6 : jsDayB - 1;
+                      if (euDayA !== euDayB) return euDayA - euDayB;
+                      return a.localeCompare(b);
+                    });
+
+                  // Get unique references that appear on this line
+                  const lineReferences = Array.from(
+                    new Set(linePlanItems.map((p) => p.referenceId))
+                  ).sort((a, b) => {
+                    const nameA = state.references.find((r) => r.id === a)?.name || a;
+                    const nameB = state.references.find((r) => r.id === b)?.name || b;
+                    return nameA.localeCompare(nameB);
+                  });
+
+                  const dayNames = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+
+                  return (
+                    <div key={line.id} className="border border-gray-300 rounded-md overflow-hidden">
+                      <div className="bg-gray-200 px-4 py-2 font-bold text-gray-900">
+                        {line.name}
+                      </div>
+                      <div className="overflow-x-auto">
+                        <table className="min-w-full text-sm">
+                          <thead>
+                            <tr className="bg-gray-100">
+                              <th className="px-4 py-2 text-left font-semibold text-gray-700 border-b border-r">
+                                Reference
+                              </th>
+                              {uniqueDates.map((date) => {
+                                const dateObj = new Date(date);
+                                const jsDayOfWeek = dateObj.getDay();
+                                const dayOfWeek = jsDayOfWeek === 0 ? 6 : jsDayOfWeek - 1;
+                                const dayName = dayNames[dayOfWeek];
+                                return (
+                                  <th
+                                    key={date}
+                                    className="px-4 py-2 text-center font-semibold text-gray-700 border-b"
+                                  >
+                                    {dayName}
+                                  </th>
+                                );
+                              })}
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {lineReferences.map((refId) => {
+                              const refName = state.references.find((r) => r.id === refId)?.name || refId;
+                              return (
+                                <tr key={refId} className="border-b">
+                                  <td className="px-4 py-2 font-medium text-gray-900 border-r bg-gray-50">
+                                    {refName}
+                                  </td>
+                                  {uniqueDates.map((date) => {
+                                    const quantity = linePlanItems
+                                      .filter((p) => p.date === date && p.referenceId === refId)
+                                      .reduce((sum, p) => sum + p.quantity, 0);
+
+                                    return (
+                                      <td
+                                        key={date}
+                                        className="px-4 py-2 text-center text-gray-700"
+                                      >
+                                        {quantity > 0 ? quantity.toFixed(1) : '-'}
+                                      </td>
+                                    );
+                                  })}
+                                </tr>
+                              );
+                            })}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
           </div>
         </div>
       )}
