@@ -91,37 +91,59 @@ export function generateProductionPlan(state: AppState): {
   for (const demand of sortedDemands) {
     let remainingQuantity = demand.quantity;
     const initialQuantity = demand.quantity;
+    const deadlineDate = demand.deadline ? new Date(demand.deadline) : endDate;
+
+    // Ensure deadline is within the planning week
+    const effectiveDeadline = deadlineDate < endDate ? deadlineDate : endDate;
 
     while (remainingQuantity > 0) {
-      // Find best line for this demand that hasn't exceeded the week
+      // Find best line for this demand that hasn't exceeded the deadline
       const bestLine = findBestLine(
         demand.referenceId,
         remainingQuantity,
         lineSchedules,
         state,
-        endDate
+        effectiveDeadline
       );
 
       if (!bestLine) {
         if (remainingQuantity === initialQuantity) {
-          errors.push(
-            `Cannot schedule demand for ${getReferenceName(demand.referenceId, state)}: No compatible line found or insufficient throughput configured`
-          );
+          if (demand.deadline) {
+            errors.push(
+              `Cannot schedule demand for ${getReferenceName(demand.referenceId, state)}: No compatible line found or cannot meet deadline of ${new Date(demand.deadline).toLocaleDateString()}`
+            );
+          } else {
+            errors.push(
+              `Cannot schedule demand for ${getReferenceName(demand.referenceId, state)}: No compatible line found or insufficient throughput configured`
+            );
+          }
         } else {
-          warnings.push(
-            `Partial fulfillment for ${getReferenceName(demand.referenceId, state)}: ${(initialQuantity - remainingQuantity).toFixed(1)} tons scheduled, ${remainingQuantity.toFixed(1)} tons unmet (insufficient capacity within the week)`
-          );
+          if (demand.deadline) {
+            warnings.push(
+              `Partial fulfillment for ${getReferenceName(demand.referenceId, state)}: ${(initialQuantity - remainingQuantity).toFixed(1)} tons scheduled, ${remainingQuantity.toFixed(1)} tons unmet (cannot meet deadline of ${new Date(demand.deadline).toLocaleDateString()})`
+            );
+          } else {
+            warnings.push(
+              `Partial fulfillment for ${getReferenceName(demand.referenceId, state)}: ${(initialQuantity - remainingQuantity).toFixed(1)} tons scheduled, ${remainingQuantity.toFixed(1)} tons unmet (insufficient capacity within the week)`
+            );
+          }
         }
         break;
       }
 
       const schedule = lineSchedules.get(bestLine.lineId)!;
 
-      // Check if we're beyond the week limit
-      if (schedule.currentDate >= endDate) {
-        warnings.push(
-          `Cannot fit remaining ${remainingQuantity.toFixed(1)} tons of ${getReferenceName(demand.referenceId, state)}: Week capacity exhausted`
-        );
+      // Check if we're beyond the deadline/week limit
+      if (schedule.currentDate >= effectiveDeadline) {
+        if (demand.deadline) {
+          warnings.push(
+            `Cannot fit remaining ${remainingQuantity.toFixed(1)} tons of ${getReferenceName(demand.referenceId, state)}: Deadline of ${new Date(demand.deadline).toLocaleDateString()} cannot be met`
+          );
+        } else {
+          warnings.push(
+            `Cannot fit remaining ${remainingQuantity.toFixed(1)} tons of ${getReferenceName(demand.referenceId, state)}: Week capacity exhausted`
+          );
+        }
         break;
       }
 
@@ -151,7 +173,7 @@ export function generateProductionPlan(state: AppState): {
           setupDuration,
           true,
           state,
-          endDate
+          effectiveDeadline
         );
 
         if (setupResult) {
@@ -177,11 +199,17 @@ export function generateProductionPlan(state: AppState): {
         schedule.currentDate.setDate(schedule.currentDate.getDate() + 1);
         schedule.currentHour = 0;
 
-        // Check if we've exceeded the week
-        if (schedule.currentDate >= endDate) {
-          warnings.push(
-            `Cannot fit remaining ${remainingQuantity.toFixed(1)} tons of ${getReferenceName(demand.referenceId, state)}: Week capacity exhausted`
-          );
+        // Check if we've exceeded the deadline/week
+        if (schedule.currentDate >= effectiveDeadline) {
+          if (demand.deadline) {
+            warnings.push(
+              `Cannot fit remaining ${remainingQuantity.toFixed(1)} tons of ${getReferenceName(demand.referenceId, state)}: Deadline of ${new Date(demand.deadline).toLocaleDateString()} cannot be met`
+            );
+          } else {
+            warnings.push(
+              `Cannot fit remaining ${remainingQuantity.toFixed(1)} tons of ${getReferenceName(demand.referenceId, state)}: Week capacity exhausted`
+            );
+          }
           break;
         }
         continue;
@@ -200,7 +228,7 @@ export function generateProductionPlan(state: AppState): {
         hoursToUse,
         false,
         state,
-        endDate
+        effectiveDeadline
       );
 
       if (productionResult) {
@@ -220,11 +248,17 @@ export function generateProductionPlan(state: AppState): {
         schedule.currentDate.setDate(schedule.currentDate.getDate() + 1);
         schedule.currentHour = 0;
 
-        // Check if we've exceeded the week
-        if (schedule.currentDate >= endDate) {
-          warnings.push(
-            `Cannot fit remaining ${remainingQuantity.toFixed(1)} tons of ${getReferenceName(demand.referenceId, state)}: Week capacity exhausted`
-          );
+        // Check if we've exceeded the deadline/week
+        if (schedule.currentDate >= effectiveDeadline) {
+          if (demand.deadline) {
+            warnings.push(
+              `Cannot fit remaining ${remainingQuantity.toFixed(1)} tons of ${getReferenceName(demand.referenceId, state)}: Deadline of ${new Date(demand.deadline).toLocaleDateString()} cannot be met`
+            );
+          } else {
+            warnings.push(
+              `Cannot fit remaining ${remainingQuantity.toFixed(1)} tons of ${getReferenceName(demand.referenceId, state)}: Week capacity exhausted`
+            );
+          }
           break;
         }
       }
@@ -255,24 +289,27 @@ function findBestLine(
 
     const productionTime = quantity / throughput.rate;
     let setupTime = 0;
+    let setupPenalty = 0;
 
     // Check if this line would need setup time
     if (schedule.lastReferenceId && schedule.lastReferenceId !== referenceId) {
       setupTime = getSetupTime(lineId, schedule.lastReferenceId, referenceId, state);
+      // HUGE penalty for setup to minimize line changes and keep references on same line
+      setupPenalty = 1000; // This strongly discourages switching lines
+    } else if (schedule.lastReferenceId === referenceId) {
+      // Small bonus for continuing same reference (negative penalty)
+      setupPenalty = -50; // Prefer continuing on same line
     }
-
-    // Calculate total cost with strong load balancing
-    const totalTimeUsed = Array.from(schedule.dailyHoursUsed.values()).reduce((sum, hours) => sum + hours, 0);
-
-    // Strong load balancing: heavily penalize already-used lines
-    // This ensures work is distributed evenly across all available lines
-    const loadPenalty = totalTimeUsed * 2.0; // Aggressive penalty for heavily used lines
 
     // Check if line has capacity on current day
     const availableToday = getAvailableHours(schedule, lineId, state);
-    const dayPenalty = availableToday === 0 ? 100 : 0; // Large penalty if line is full today
+    const dayPenalty = availableToday === 0 ? 200 : 0; // Large penalty if line is full today
 
-    const cost = productionTime + setupTime + loadPenalty + dayPenalty;
+    // Small penalty for total utilization (very light load balancing, only as tiebreaker)
+    const totalTimeUsed = Array.from(schedule.dailyHoursUsed.values()).reduce((sum, hours) => sum + hours, 0);
+    const loadPenalty = totalTimeUsed * 0.01; // Very small penalty, just for tiebreaking
+
+    const cost = productionTime + setupTime + setupPenalty + dayPenalty + loadPenalty;
 
     if (!bestLine || cost < bestLine.cost) {
       bestLine = { lineId, cost };
