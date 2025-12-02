@@ -43,6 +43,7 @@ interface AppContextType {
   addDemand: (demand: Demand) => void;
   deleteDemand: (index: number) => void;
   setPlanItems: (planItems: PlanItem[]) => void;
+  setPlanWeek: (week: number) => void;
   clearAll: () => void;
   exportData: () => string;
   importData: (jsonData: string) => void;
@@ -188,6 +189,10 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
     setState((prev) => ({ ...prev, planItems }));
   };
 
+  const setPlanWeek = (week: number) => {
+    setState((prev) => ({ ...prev, planWeek: week }));
+  };
+
   const clearAll = () => {
     setState(initialState);
   };
@@ -227,6 +232,7 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
         addDemand,
         deleteDemand,
         setPlanItems,
+        setPlanWeek,
         clearAll,
         exportData,
         importData,

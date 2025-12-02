@@ -3,10 +3,11 @@ import { useApp } from '../context/AppContext';
 import { generateProductionPlan } from '../utils/scheduler';
 
 export const Planner = () => {
-  const { state, addDemand, deleteDemand, setPlanItems } = useApp();
+  const { state, addDemand, deleteDemand, setPlanItems, setPlanWeek } = useApp();
   const [planErrors, setPlanErrors] = useState<string[]>([]);
   const [planWarnings, setPlanWarnings] = useState<string[]>([]);
   const [showDetailedPlan, setShowDetailedPlan] = useState(false);
+  const [weekNumber, setWeekNumber] = useState<string>('');
   const [formData, setFormData] = useState({
     referenceId: '',
     quantity: '',
@@ -41,7 +42,20 @@ export const Planner = () => {
   const handleGeneratePlan = () => {
     setPlanErrors([]);
     setPlanWarnings([]);
-    const result = generateProductionPlan(state);
+
+    // Validate week number
+    if (!weekNumber || weekNumber.trim() === '') {
+      alert('Please enter a week number before generating the plan.');
+      return;
+    }
+
+    const week = parseInt(weekNumber);
+    if (isNaN(week)) {
+      alert('Please enter a valid week number.');
+      return;
+    }
+
+    const result = generateProductionPlan(state, week);
 
     if (result.errors.length > 0) {
       setPlanErrors(result.errors);
@@ -53,9 +67,10 @@ export const Planner = () => {
 
     if (result.planItems.length > 0) {
       setPlanItems(result.planItems);
+      setPlanWeek(week);
       const message = result.warnings.length > 0
-        ? `Plan generated with warnings. ${result.planItems.length} items scheduled. Check warnings below.`
-        : `Plan generated successfully! ${result.planItems.length} items scheduled.`;
+        ? `Plan generated with warnings for Week ${week}. ${result.planItems.length} items scheduled. Check warnings below.`
+        : `Plan generated successfully for Week ${week}! ${result.planItems.length} items scheduled.`;
       alert(message);
     } else if (result.errors.length === 0) {
       alert('No plan items generated. Please check your configuration.');
@@ -194,7 +209,11 @@ export const Planner = () => {
                     </td>
                     <td className="px-4 py-2 text-sm border-b">
                       {demand.deadline
-                        ? new Date(demand.deadline).toLocaleDateString()
+                        ? new Date(demand.deadline).toLocaleDateString('en-GB', {
+                            day: '2-digit',
+                            month: '2-digit',
+                            year: 'numeric',
+                          }).replace(/\//g, '.')
                         : '-'}
                     </td>
                     <td className="px-4 py-2 text-sm border-b text-center">
@@ -244,20 +263,34 @@ export const Planner = () => {
       {/* Generate Plan Button */}
       {state.demands.length > 0 && (
         <div className="bg-white p-6 rounded-lg shadow-sm border border-gray-200">
-          <div className="flex justify-between items-center">
-            <div>
+          <div className="flex justify-between items-start gap-6">
+            <div className="flex-1">
               <h3 className="text-lg font-semibold mb-1">Generate Production Plan</h3>
               <p className="text-sm text-gray-600">
                 Click to generate an optimized production schedule based on your demands and
                 configuration.
               </p>
             </div>
-            <button
-              onClick={handleGeneratePlan}
-              className="bg-green-500 hover:bg-green-600 text-white px-6 py-3 rounded-md font-semibold"
-            >
-              Generate Plan
-            </button>
+            <div className="flex items-end gap-3">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">
+                  Week Number *
+                </label>
+                <input
+                  type="number"
+                  value={weekNumber}
+                  onChange={(e) => setWeekNumber(e.target.value)}
+                  placeholder="e.g., 1"
+                  className="w-24 px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-green-500"
+                />
+              </div>
+              <button
+                onClick={handleGeneratePlan}
+                className="bg-green-500 hover:bg-green-600 text-white px-6 py-3 rounded-md font-semibold whitespace-nowrap"
+              >
+                Generate Plan
+              </button>
+            </div>
           </div>
         </div>
       )}
@@ -267,7 +300,9 @@ export const Planner = () => {
         <div className="bg-white p-6 rounded-lg shadow-sm border border-gray-200 mt-6">
           <div className="flex justify-between items-center mb-4">
             <div>
-              <h3 className="text-lg font-semibold">Generated Production Plan</h3>
+              <h3 className="text-lg font-semibold">
+                Generated Production Plan {state.planWeek && `- Week ${state.planWeek}`}
+              </h3>
               <p className="text-sm text-gray-600 mt-1">
                 {state.planItems.length} items scheduled (
                 {state.planItems.filter((p) => !p.isSetup).length} production,{' '}
@@ -323,7 +358,7 @@ export const Planner = () => {
                 return (
                   <div key={date} className="border border-gray-200 rounded-md overflow-hidden">
                     <div className="bg-gray-100 px-4 py-2 font-semibold text-gray-800">
-                      {dayName} - {dateObj.toLocaleDateString('en-GB', { day: '2-digit', month: '2-digit' })}
+                      {dayName}
                     </div>
                     <div className="p-4 space-y-3">
                       {Object.entries(byLine)
@@ -584,7 +619,7 @@ export const Planner = () => {
                   return (
                     <div key={line.id} className="border border-gray-300 rounded-md overflow-hidden">
                       <div className="bg-gray-200 px-4 py-2 font-bold text-gray-900">
-                        {line.name}
+                        {line.name} {state.planWeek && `- Week ${state.planWeek}`}
                       </div>
                       <div className="overflow-x-auto">
                         <table className="min-w-full text-sm">

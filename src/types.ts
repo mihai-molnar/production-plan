@@ -52,4 +52,5 @@ export interface AppState {
   setupTimes: SetupTime[];
   demands: Demand[];
   planItems: PlanItem[];
+  planWeek?: number; // Week number for the current plan
 }

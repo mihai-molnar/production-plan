@@ -11,7 +11,95 @@ interface LineSchedule {
   dailyHoursUsed: Map<string, number>; // dateKey -> hours used
 }
 
-export function generateProductionPlan(state: AppState): {
+interface LineCompatibility {
+  lineId: string;
+  referenceId: string;
+  throughputRate: number;
+  totalCapacity: number;
+}
+
+interface PreferredLineMap {
+  [referenceId: string]: string; // referenceId -> preferred lineId
+}
+
+// Phase 1: Pre-Analysis - Build reference-line compatibility matrix
+function buildCompatibilityMatrix(
+  state: AppState,
+  startDate: Date,
+  endDate: Date
+): LineCompatibility[] {
+  const compatibilities: LineCompatibility[] = [];
+
+  for (const reference of state.references) {
+    for (const line of state.lines) {
+      const throughput = state.throughputs.find(
+        (t) => t.lineId === line.id && t.referenceId === reference.id
+      );
+
+      if (throughput) {
+        // Calculate total available hours for this line
+        let totalHours = 0;
+        const tempDate = new Date(startDate);
+
+        while (tempDate <= endDate) {
+          const jsDayOfWeek = tempDate.getDay();
+          const dayOfWeek = jsDayOfWeek === 0 ? 6 : jsDayOfWeek - 1;
+          const availability = state.availabilities.find(
+            (a) => a.lineId === line.id && a.dayOfWeek === dayOfWeek
+          );
+
+          if (availability) {
+            totalHours += availability.hoursAvailable;
+          }
+
+          tempDate.setDate(tempDate.getDate() + 1);
+        }
+
+        compatibilities.push({
+          lineId: line.id,
+          referenceId: reference.id,
+          throughputRate: throughput.rate,
+          totalCapacity: totalHours * throughput.rate,
+        });
+      }
+    }
+  }
+
+  return compatibilities;
+}
+
+// Phase 1: Identify optimal (preferred) line for each reference
+function identifyPreferredLines(compatibilities: LineCompatibility[]): PreferredLineMap {
+  const preferredLines: PreferredLineMap = {};
+
+  // Group by reference
+  const byReference = new Map<string, LineCompatibility[]>();
+  for (const comp of compatibilities) {
+    if (!byReference.has(comp.referenceId)) {
+      byReference.set(comp.referenceId, []);
+    }
+    byReference.get(comp.referenceId)!.push(comp);
+  }
+
+  // For each reference, find the line with highest throughput
+  for (const [referenceId, lines] of byReference) {
+    lines.sort((a, b) => {
+      // Sort by throughput rate (descending), then by total capacity (descending)
+      if (b.throughputRate !== a.throughputRate) {
+        return b.throughputRate - a.throughputRate;
+      }
+      return b.totalCapacity - a.totalCapacity;
+    });
+
+    if (lines.length > 0) {
+      preferredLines[referenceId] = lines[0].lineId;
+    }
+  }
+
+  return preferredLines;
+}
+
+export function generateProductionPlan(state: AppState, weekNumber: number = 1): {
   planItems: PlanItem[];
   errors: string[];
   warnings: string[];
@@ -63,21 +151,29 @@ export function generateProductionPlan(state: AppState): {
   });
 
   // Initialize line schedules with week constraint
-  // Start from Monday of the current week (EU week system)
-  const startDate = new Date();
-  startDate.setHours(0, 0, 0, 0);
+  // Calculate start date for the specified week number (ISO week system)
+  const now = new Date();
+  const currentYear = now.getFullYear();
 
-  // Get the current day (0=Sunday, 1=Monday, ..., 6=Saturday)
-  const currentDay = startDate.getDay();
-  // Calculate days to subtract to get to Monday
-  const daysToMonday = currentDay === 0 ? 6 : currentDay - 1; // If Sunday, go back 6 days; else go back (day - 1)
-  startDate.setDate(startDate.getDate() - daysToMonday);
+  // Get January 4th of the current year (always in week 1 by ISO definition)
+  const jan4 = new Date(currentYear, 0, 4);
+
+  // Find Monday of week 1
+  const jan4Day = jan4.getDay();
+  const daysToMonday = jan4Day === 0 ? 6 : jan4Day - 1;
+  const week1Monday = new Date(jan4);
+  week1Monday.setDate(jan4.getDate() - daysToMonday);
+
+  // Calculate start date for the requested week
+  const startDate = new Date(week1Monday);
+  startDate.setDate(week1Monday.getDate() + (weekNumber - 1) * 7);
+  startDate.setHours(0, 0, 0, 0);
 
   const endDate = new Date(startDate);
   endDate.setDate(endDate.getDate() + 6); // 6 days from Monday = Sunday
   endDate.setHours(23, 59, 59, 999); // Include the full Sunday
 
-  console.log(`[SCHEDULER] Planning week: ${startDate.toDateString()} to ${endDate.toDateString()}`);
+  console.log(`[SCHEDULER] Planning Week ${weekNumber} (${currentYear}): ${startDate.toDateString()} to ${endDate.toDateString()}`);
 
   const lineSchedules: Map<string, LineSchedule> = new Map();
   state.lines.forEach((line) => {
@@ -90,7 +186,18 @@ export function generateProductionPlan(state: AppState): {
     });
   });
 
-  // Schedule each demand
+  // Phase 1: Pre-Analysis
+  console.log('[SCHEDULER] Phase 1: Building compatibility matrix and identifying preferred lines');
+  const compatibilities = buildCompatibilityMatrix(state, startDate, endDate);
+  const preferredLines = identifyPreferredLines(compatibilities);
+
+  for (const [refId, lineId] of Object.entries(preferredLines)) {
+    const refName = getReferenceName(refId, state);
+    const lineName = state.lines.find(l => l.id === lineId)?.name || lineId;
+    console.log(`[SCHEDULER] Preferred line for ${refName}: ${lineName}`);
+  }
+
+  // Phase 4: Schedule each demand with improved loop logic
   for (const demand of sortedDemands) {
     let remainingQuantity = demand.quantity;
     const initialQuantity = demand.quantity;
@@ -99,100 +206,89 @@ export function generateProductionPlan(state: AppState): {
     // Ensure deadline is within the planning week
     const effectiveDeadline = deadlineDate < endDate ? deadlineDate : endDate;
 
+    let selectedLineId: string | null = null;
+    const attemptedLines = new Set<string>();
+
     while (remainingQuantity > 0) {
-      // DEBUG: Log iteration start
       console.log(`[SCHEDULER] Scheduling ${getReferenceName(demand.referenceId, state)}: ${remainingQuantity.toFixed(1)} tons remaining`);
 
-      // Find best line for this demand that hasn't exceeded the deadline
-      const bestLine = findBestLine(
-        demand.referenceId,
-        remainingQuantity,
-        lineSchedules,
-        state,
-        effectiveDeadline,
-        planItems
-      );
+      // Only select a new line if:
+      // 1. We don't have a selected line yet, OR
+      // 2. The current line is completely exhausted
+      if (!selectedLineId) {
+        selectedLineId = selectLineForDemand(
+          demand.referenceId,
+          remainingQuantity,
+          lineSchedules,
+          state,
+          effectiveDeadline,
+          planItems,
+          preferredLines
+        );
 
-      if (bestLine) {
-        const selectedSchedule = lineSchedules.get(bestLine.lineId)!;
-        const selectedLineName = state.lines.find(l => l.id === bestLine.lineId)?.name || bestLine.lineId;
-        console.log(`[SCHEDULER] Selected ${selectedLineName}, currentDate=${selectedSchedule.currentDate.toDateString()}, cost=${bestLine.cost.toFixed(1)}`);
-      }
-
-      if (!bestLine) {
-        // DEBUG: Log why we couldn't find a line
-        console.log(`[SCHEDULER DEBUG] No line found for ${getReferenceName(demand.referenceId, state)}, remaining: ${remainingQuantity.toFixed(1)} tons`);
-        console.log('[SCHEDULER DEBUG] Line schedules:');
-        for (const [lineId, schedule] of lineSchedules) {
-          const lineName = state.lines.find(l => l.id === lineId)?.name || lineId;
-          const canProduce = state.throughputs.find(t => t.lineId === lineId && t.referenceId === demand.referenceId);
-          const availableHours = getAvailableHours(schedule, lineId, state);
-          console.log(`  ${lineName}: currentDate=${schedule.currentDate.toDateString()}, endDate=${effectiveDeadline.toDateString()}, pastDeadline=${schedule.currentDate >= effectiveDeadline}, canProduce=${!!canProduce}, availableToday=${availableHours.toFixed(1)}h`);
+        if (!selectedLineId) {
+          // No lines available at all
+          if (remainingQuantity === initialQuantity) {
+            if (demand.deadline) {
+              errors.push(
+                `Cannot schedule demand for ${getReferenceName(demand.referenceId, state)}: No compatible line found or cannot meet deadline of ${new Date(demand.deadline).toLocaleDateString('en-GB', { day: '2-digit', month: '2-digit', year: 'numeric' }).replace(/\//g, '.')}`
+              );
+            } else {
+              errors.push(
+                `Cannot schedule demand for ${getReferenceName(demand.referenceId, state)}: No compatible line found or insufficient throughput configured`
+              );
+            }
+          } else {
+            if (demand.deadline) {
+              warnings.push(
+                `Partial fulfillment for ${getReferenceName(demand.referenceId, state)}: ${(initialQuantity - remainingQuantity).toFixed(1)} tons scheduled, ${remainingQuantity.toFixed(1)} tons unmet (cannot meet deadline of ${new Date(demand.deadline).toLocaleDateString('en-GB', { day: '2-digit', month: '2-digit', year: 'numeric' }).replace(/\//g, '.')})`
+              );
+            } else {
+              warnings.push(
+                `Partial fulfillment for ${getReferenceName(demand.referenceId, state)}: ${(initialQuantity - remainingQuantity).toFixed(1)} tons scheduled, ${remainingQuantity.toFixed(1)} tons unmet (insufficient capacity within the week)`
+              );
+            }
+          }
+          break;
         }
 
-        if (remainingQuantity === initialQuantity) {
-          if (demand.deadline) {
-            errors.push(
-              `Cannot schedule demand for ${getReferenceName(demand.referenceId, state)}: No compatible line found or cannot meet deadline of ${new Date(demand.deadline).toLocaleDateString()}`
-            );
-          } else {
-            errors.push(
-              `Cannot schedule demand for ${getReferenceName(demand.referenceId, state)}: No compatible line found or insufficient throughput configured`
-            );
-          }
-        } else {
-          if (demand.deadline) {
-            warnings.push(
-              `Partial fulfillment for ${getReferenceName(demand.referenceId, state)}: ${(initialQuantity - remainingQuantity).toFixed(1)} tons scheduled, ${remainingQuantity.toFixed(1)} tons unmet (cannot meet deadline of ${new Date(demand.deadline).toLocaleDateString()})`
-            );
-          } else {
-            warnings.push(
-              `Partial fulfillment for ${getReferenceName(demand.referenceId, state)}: ${(initialQuantity - remainingQuantity).toFixed(1)} tons scheduled, ${remainingQuantity.toFixed(1)} tons unmet (insufficient capacity within the week)`
-            );
-          }
+        // Prevent infinite loops
+        if (attemptedLines.has(selectedLineId)) {
+          console.log(`[SCHEDULER] Already attempted line ${state.lines.find(l => l.id === selectedLineId)?.name}, breaking to avoid loop`);
+          break;
         }
-        break;
+        attemptedLines.add(selectedLineId);
       }
 
-      const schedule = lineSchedules.get(bestLine.lineId)!;
-      const lineName = state.lines.find(l => l.id === bestLine.lineId)?.name || bestLine.lineId;
+      const schedule = lineSchedules.get(selectedLineId)!;
+      const lineName = state.lines.find(l => l.id === selectedLineId)?.name || selectedLineId;
 
       // Check if we're beyond the deadline/week limit
-      if (schedule.currentDate >= effectiveDeadline) {
-        console.log(`[SCHEDULER] STOPPING: ${lineName} currentDate (${schedule.currentDate.toDateString()}) >= deadline (${effectiveDeadline.toDateString()})`);
-        if (demand.deadline) {
-          warnings.push(
-            `Cannot fit remaining ${remainingQuantity.toFixed(1)} tons of ${getReferenceName(demand.referenceId, state)}: Deadline of ${new Date(demand.deadline).toLocaleDateString()} cannot be met`
-          );
-        } else {
-          warnings.push(
-            `Cannot fit remaining ${remainingQuantity.toFixed(1)} tons of ${getReferenceName(demand.referenceId, state)}: Week capacity exhausted`
-          );
-        }
-        break;
+      if (schedule.currentDate > effectiveDeadline) {
+        console.log(`[SCHEDULER] Line ${lineName} exhausted (past deadline), selecting another line`);
+        selectedLineId = null;
+        continue;
       }
 
       const throughput = state.throughputs.find(
-        (t) => t.lineId === bestLine.lineId && t.referenceId === demand.referenceId
+        (t) => t.lineId === selectedLineId && t.referenceId === demand.referenceId
       )!;
 
       // Check if setup is needed (when switching references on the same line)
       if (schedule.lastReferenceId && schedule.lastReferenceId !== demand.referenceId) {
         const setupTime = getSetupTime(
-          bestLine.lineId,
+          selectedLineId,
           schedule.lastReferenceId,
           demand.referenceId,
           state
         );
 
-        // Always add setup when switching references, even if configured as 0
-        // If no setup time configured, use 0 but still create the setup block for visibility
         const setupDuration = setupTime > 0 ? setupTime : 0;
 
         // Schedule setup time block
         const setupResult = scheduleTask(
           schedule,
-          bestLine.lineId,
+          selectedLineId,
           demand.referenceId,
           0,
           setupDuration,
@@ -204,20 +300,14 @@ export function generateProductionPlan(state: AppState): {
         if (setupResult) {
           planItems.push(setupResult);
         } else if (setupDuration > 0) {
-          // Only warn if there was actual setup time that couldn't fit
-          warnings.push(
-            `Cannot fit setup time (${setupDuration.toFixed(1)}h) for ${getReferenceName(demand.referenceId, state)} on line ${state.lines.find(l => l.id === bestLine.lineId)?.name}: Insufficient time within the week`
-          );
-          break;
+          console.log(`[SCHEDULER] Setup couldn't fit on ${lineName}, trying another line`);
+          selectedLineId = null;
+          continue;
         }
       }
 
-      // Calculate how much we can produce
-      const availableHours = getAvailableHours(
-        schedule,
-        bestLine.lineId,
-        state
-      );
+      // Calculate how much we can produce today
+      const availableHours = getAvailableHours(schedule, selectedLineId, state);
 
       if (availableHours <= 0) {
         // No capacity left on this line today - advance to next day
@@ -226,10 +316,8 @@ export function generateProductionPlan(state: AppState): {
 
         // Check if we've exceeded the deadline/week
         if (schedule.currentDate > effectiveDeadline) {
-          // This line is exhausted, but don't give up yet - try to find another line
-          console.log(`[SCHEDULER] ${lineName} exhausted, trying other lines for remaining ${remainingQuantity.toFixed(1)} tons`);
-          // Break from this line's attempt and findBestLine will try other lines
-          break;
+          console.log(`[SCHEDULER] Line ${lineName} completely exhausted, trying another line`);
+          selectedLineId = null;
         }
         continue;
       }
@@ -241,7 +329,7 @@ export function generateProductionPlan(state: AppState): {
       // Schedule production
       const productionResult = scheduleTask(
         schedule,
-        bestLine.lineId,
+        selectedLineId,
         demand.referenceId,
         quantityToSchedule,
         hoursToUse,
@@ -255,88 +343,292 @@ export function generateProductionPlan(state: AppState): {
         remainingQuantity -= quantityToSchedule;
         schedule.lastReferenceId = demand.referenceId;
       } else {
-        // Couldn't schedule within the week
-        warnings.push(
-          `Cannot fit remaining ${remainingQuantity.toFixed(1)} tons of ${getReferenceName(demand.referenceId, state)}: Week capacity exhausted`
+        // Couldn't schedule - line is exhausted
+        console.log(`[SCHEDULER] Couldn't schedule on ${lineName}, trying another line`);
+        selectedLineId = null;
+        continue;
+      }
+    }
+  }
+
+  // Phase 5: Final pass - ensure full capacity utilization
+  console.log('[SCHEDULER] Phase 5: Final capacity utilization pass');
+
+  // Build a map of demand fulfillment
+  const demandFulfillment = new Map<string, { demand: typeof sortedDemands[0], scheduled: number }>();
+  for (const demand of sortedDemands) {
+    const scheduled = planItems
+      .filter(p => p.referenceId === demand.referenceId && !p.isSetup)
+      .reduce((sum, p) => sum + p.quantity, 0);
+    demandFulfillment.set(demand.referenceId, { demand, scheduled });
+  }
+
+  // Find unfulfilled demands
+  const unfulfilledDemands = Array.from(demandFulfillment.values())
+    .filter(({ demand, scheduled }) => scheduled < demand.quantity)
+    .map(({ demand, scheduled }) => ({
+      demand,
+      remainingQuantity: demand.quantity - scheduled,
+    }));
+
+  if (unfulfilledDemands.length > 0) {
+    console.log(`[SCHEDULER] Found ${unfulfilledDemands.length} unfulfilled demands, attempting to use remaining capacity`);
+
+    // Check each line for remaining capacity
+    for (const [lineId, schedule] of lineSchedules) {
+      const lineName = state.lines.find(l => l.id === lineId)?.name || lineId;
+
+      // Calculate total remaining hours on this line
+      let totalRemainingHours = 0;
+      const tempDate = new Date(schedule.currentDate);
+
+      while (tempDate <= endDate) {
+        const jsDayOfWeek = tempDate.getDay();
+        const dayOfWeek = jsDayOfWeek === 0 ? 6 : jsDayOfWeek - 1;
+        const availability = state.availabilities.find(
+          (a) => a.lineId === lineId && a.dayOfWeek === dayOfWeek
         );
-        break;
+
+        if (availability) {
+          const dateKey = getDateKey(tempDate);
+          const usedHours = schedule.dailyHoursUsed.get(dateKey) || 0;
+          totalRemainingHours += Math.max(0, availability.hoursAvailable - usedHours);
+        }
+
+        tempDate.setDate(tempDate.getDate() + 1);
       }
 
-      // If we couldn't schedule anything, move to next day
-      if (quantityToSchedule === 0) {
-        schedule.currentDate.setDate(schedule.currentDate.getDate() + 1);
-        schedule.currentHour = 0;
+      if (totalRemainingHours > 0) {
+        console.log(`[SCHEDULER] Line ${lineName} has ${totalRemainingHours.toFixed(1)}h remaining capacity`);
 
-        // Check if we've exceeded the deadline/week
-        if (schedule.currentDate > effectiveDeadline) {
-          // This line is exhausted, try another line
-          console.log(`[SCHEDULER] ${lineName} exhausted (no quantity scheduled), trying other lines`);
-          break;
+        // Try to fit unfulfilled demands
+        for (const unfulfilledDemand of unfulfilledDemands) {
+          if (unfulfilledDemand.remainingQuantity <= 0) continue;
+
+          const demand = unfulfilledDemand.demand;
+          const throughput = state.throughputs.find(
+            (t) => t.lineId === lineId && t.referenceId === demand.referenceId
+          );
+
+          if (!throughput) continue; // Line can't produce this reference
+
+          const possibleQuantity = totalRemainingHours * throughput.rate;
+          const quantityToSchedule = Math.min(possibleQuantity, unfulfilledDemand.remainingQuantity);
+
+          if (quantityToSchedule > 0) {
+            console.log(`[SCHEDULER] CAPACITY FILL: Scheduling ${quantityToSchedule.toFixed(1)} tons of ${getReferenceName(demand.referenceId, state)} on ${lineName}`);
+
+            // Check if setup is needed
+            if (schedule.lastReferenceId && schedule.lastReferenceId !== demand.referenceId) {
+              const setupTime = getSetupTime(
+                lineId,
+                schedule.lastReferenceId,
+                demand.referenceId,
+                state
+              );
+
+              if (setupTime > 0) {
+                const setupResult = scheduleTask(
+                  schedule,
+                  lineId,
+                  demand.referenceId,
+                  0,
+                  setupTime,
+                  true,
+                  state,
+                  endDate
+                );
+
+                if (setupResult) {
+                  planItems.push(setupResult);
+                  totalRemainingHours -= setupTime;
+                }
+              }
+            }
+
+            // Schedule the production
+            const hoursNeeded = quantityToSchedule / throughput.rate;
+            let quantityScheduled = 0;
+
+            while (quantityScheduled < quantityToSchedule && schedule.currentDate <= endDate) {
+              const availableHours = getAvailableHours(schedule, lineId, state);
+
+              if (availableHours <= 0) {
+                schedule.currentDate.setDate(schedule.currentDate.getDate() + 1);
+                schedule.currentHour = 0;
+                continue;
+              }
+
+              const remainingToSchedule = quantityToSchedule - quantityScheduled;
+              const hoursForThisSlot = Math.min(
+                availableHours,
+                remainingToSchedule / throughput.rate
+              );
+              const quantityForThisSlot = hoursForThisSlot * throughput.rate;
+
+              const productionResult = scheduleTask(
+                schedule,
+                lineId,
+                demand.referenceId,
+                quantityForThisSlot,
+                hoursForThisSlot,
+                false,
+                state,
+                endDate
+              );
+
+              if (productionResult) {
+                planItems.push(productionResult);
+                quantityScheduled += quantityForThisSlot;
+                schedule.lastReferenceId = demand.referenceId;
+              } else {
+                break;
+              }
+            }
+
+            // Update unfulfilled demand tracking
+            const unfulfilledEntry = unfulfilledDemands.find(
+              u => u.demand.referenceId === demand.referenceId
+            );
+            if (unfulfilledEntry) {
+              unfulfilledEntry.remainingQuantity -= quantityScheduled;
+            }
+
+            totalRemainingHours -= hoursNeeded;
+
+            if (totalRemainingHours <= 0) break;
+          }
         }
       }
+    }
+
+    // Update warnings to reflect what was actually fulfilled
+    // Remove old partial fulfillment warnings and add new ones if still unfulfilled
+    const stillUnfulfilled = unfulfilledDemands.filter(({ remainingQuantity }) => remainingQuantity > 0);
+
+    if (stillUnfulfilled.length > 0) {
+      console.log(`[SCHEDULER] After capacity fill, ${stillUnfulfilled.length} demands still partially unfulfilled`);
     }
   }
 
   return { planItems, errors, warnings };
 }
 
-function findBestLine(
+// Phase 3: Intelligent Line Selection with stickiness
+function selectLineForDemand(
   referenceId: string,
-  quantity: number,
+  remainingQuantity: number,
   lineSchedules: Map<string, LineSchedule>,
   state: AppState,
   effectiveDeadline: Date,
-  planItems: PlanItem[]
-): { lineId: string; cost: number } | null {
-  let bestLine: { lineId: string; cost: number } | null = null;
+  planItems: PlanItem[],
+  preferredLines: PreferredLineMap
+): string | null {
+  const refName = getReferenceName(referenceId, state);
 
-  // Check if this reference has already been scheduled on a line
+  // Priority 1: Can we continue on the current line? (Stickiness)
   const existingLine = planItems
     .filter((p) => p.referenceId === referenceId && !p.isSetup)
     .map((p) => p.lineId)[0];
 
-  // Check if existing line still has substantial capacity available
-  let existingLineHasCapacity = false;
   if (existingLine) {
     const existingSchedule = lineSchedules.get(existingLine);
-    if (existingSchedule && existingSchedule.currentDate <= effectiveDeadline) {
-      // Calculate TOTAL remaining capacity on existing line (not just today)
-      const totalCapacityLeft = Array.from(
-        { length: 7 },
-        (_, dayIndex) => {
-          const checkDate = new Date(existingSchedule.currentDate);
-          checkDate.setDate(checkDate.getDate() + dayIndex);
-          if (checkDate > effectiveDeadline) return 0;
+    const throughput = state.throughputs.find(
+      (t) => t.lineId === existingLine && t.referenceId === referenceId
+    );
 
-          const jsDayOfWeek = checkDate.getDay();
-          const dayOfWeek = jsDayOfWeek === 0 ? 6 : jsDayOfWeek - 1;
-          const availability = state.availabilities.find(
-            (a) => a.lineId === existingLine && a.dayOfWeek === dayOfWeek
-          );
-          if (!availability) return 0;
+    if (existingSchedule && throughput && existingSchedule.currentDate <= effectiveDeadline) {
+      // Calculate TOTAL remaining capacity on existing line
+      let totalRemainingHours = 0;
+      const tempDate = new Date(existingSchedule.currentDate);
 
-          const dateKey = getDateKey(checkDate);
+      while (tempDate <= effectiveDeadline) {
+        const jsDayOfWeek = tempDate.getDay();
+        const dayOfWeek = jsDayOfWeek === 0 ? 6 : jsDayOfWeek - 1;
+        const availability = state.availabilities.find(
+          (a) => a.lineId === existingLine && a.dayOfWeek === dayOfWeek
+        );
+
+        if (availability) {
+          const dateKey = getDateKey(tempDate);
           const usedHours = existingSchedule.dailyHoursUsed.get(dateKey) || 0;
-          return Math.max(0, availability.hoursAvailable - usedHours);
+          totalRemainingHours += Math.max(0, availability.hoursAvailable - usedHours);
         }
-      ).reduce((sum, hours) => sum + hours, 0);
 
-      existingLineHasCapacity = totalCapacityLeft > 24; // Substantial capacity = more than 1 day
+        tempDate.setDate(tempDate.getDate() + 1);
+      }
+
+      const quantityCanProduce = totalRemainingHours * throughput.rate;
+
+      // If existing line can handle >=50% of remaining quantity, stick with it
+      if (quantityCanProduce >= remainingQuantity * 0.5) {
+        const lineName = state.lines.find(l => l.id === existingLine)?.name || existingLine;
+        console.log(`[SCHEDULER] STICKY: Continuing ${refName} on ${lineName} (can produce ${quantityCanProduce.toFixed(1)} of ${remainingQuantity.toFixed(1)} tons)`);
+        return existingLine;
+      } else if (quantityCanProduce > 0) {
+        console.log(`[SCHEDULER] Existing line can only produce ${quantityCanProduce.toFixed(1)} of ${remainingQuantity.toFixed(1)} tons, considering alternatives`);
+      }
     }
   }
+
+  // Priority 2: Use the preferred optimal line if available
+  const preferredLineId = preferredLines[referenceId];
+  if (preferredLineId) {
+    const preferredSchedule = lineSchedules.get(preferredLineId);
+    const throughput = state.throughputs.find(
+      (t) => t.lineId === preferredLineId && t.referenceId === referenceId
+    );
+
+    if (preferredSchedule && throughput && preferredSchedule.currentDate <= effectiveDeadline) {
+      // Calculate remaining capacity
+      let totalRemainingHours = 0;
+      const tempDate = new Date(preferredSchedule.currentDate);
+
+      while (tempDate <= effectiveDeadline) {
+        const jsDayOfWeek = tempDate.getDay();
+        const dayOfWeek = jsDayOfWeek === 0 ? 6 : jsDayOfWeek - 1;
+        const availability = state.availabilities.find(
+          (a) => a.lineId === preferredLineId && a.dayOfWeek === dayOfWeek
+        );
+
+        if (availability) {
+          const dateKey = getDateKey(tempDate);
+          const usedHours = preferredSchedule.dailyHoursUsed.get(dateKey) || 0;
+          totalRemainingHours += Math.max(0, availability.hoursAvailable - usedHours);
+        }
+
+        tempDate.setDate(tempDate.getDate() + 1);
+      }
+
+      if (totalRemainingHours > 0) {
+        const lineName = state.lines.find(l => l.id === preferredLineId)?.name || preferredLineId;
+        console.log(`[SCHEDULER] PREFERRED: Using optimal line ${lineName} for ${refName} (${totalRemainingHours.toFixed(1)}h available)`);
+        return preferredLineId;
+      }
+    }
+  }
+
+  // Priority 3: Find any line with capacity (fallback)
+  interface CandidateLine {
+    lineId: string;
+    throughputRate: number;
+    totalRemainingHours: number;
+    setupTime: number;
+  }
+
+  const candidates: CandidateLine[] = [];
 
   for (const [lineId, schedule] of lineSchedules) {
     const throughput = state.throughputs.find(
       (t) => t.lineId === lineId && t.referenceId === referenceId
     );
 
-    if (!throughput) continue; // Line cannot produce this reference
+    if (!throughput) continue;
 
-    // Calculate total remaining capacity across all remaining days until the effective deadline
-    let totalRemainingCapacity = 0;
+    // Calculate total remaining capacity
+    let totalRemainingHours = 0;
     const tempDate = new Date(schedule.currentDate);
 
-    // Check capacity until the effective deadline for this demand
     while (tempDate <= effectiveDeadline) {
       const jsDayOfWeek = tempDate.getDay();
       const dayOfWeek = jsDayOfWeek === 0 ? 6 : jsDayOfWeek - 1;
@@ -347,84 +639,47 @@ function findBestLine(
       if (availability) {
         const dateKey = getDateKey(tempDate);
         const usedHours = schedule.dailyHoursUsed.get(dateKey) || 0;
-        totalRemainingCapacity += Math.max(0, availability.hoursAvailable - usedHours);
+        totalRemainingHours += Math.max(0, availability.hoursAvailable - usedHours);
       }
 
       tempDate.setDate(tempDate.getDate() + 1);
     }
 
-    // Skip lines with NO remaining capacity before the deadline
-    if (totalRemainingCapacity <= 0) {
-      console.log(`[SCHEDULER] Skipping ${state.lines.find(l => l.id === lineId)?.name}: No remaining capacity before deadline`);
-      continue;
-    }
+    if (totalRemainingHours <= 0) continue;
 
-    const productionTime = quantity / throughput.rate;
-    let setupTime = 0;
-    let setupPenalty = 0;
+    const setupTime = schedule.lastReferenceId && schedule.lastReferenceId !== referenceId
+      ? getSetupTime(lineId, schedule.lastReferenceId, referenceId, state)
+      : 0;
 
-    // Priority system (lower cost = better):
-    // 1. Highest throughput (most important - we want fastest line)
-    // 2. Minimize setup changes (continue on same line if possible)
-    // 3. Avoid splitting references across lines if existing line has capacity
-
-    // Throughput is PRIMARY factor - strongly prefer faster lines
-    // Negative because we want to MINIMIZE cost (higher throughput = lower cost)
-    const throughputScore = -throughput.rate * 1000;
-
-    // Setup penalty: prefer lines already running this reference
-    if (existingLine === lineId) {
-      // Calculate how much capacity is left on this line before the deadline
-      const totalCapacityLeft = Array.from(
-        { length: 7 },
-        (_, dayIndex) => {
-          const checkDate = new Date(schedule.currentDate);
-          checkDate.setDate(checkDate.getDate() + dayIndex);
-          if (checkDate > effectiveDeadline) return 0;
-
-          const jsDayOfWeek = checkDate.getDay();
-          const dayOfWeek = jsDayOfWeek === 0 ? 6 : jsDayOfWeek - 1;
-          const availability = state.availabilities.find(
-            (a) => a.lineId === lineId && a.dayOfWeek === dayOfWeek
-          );
-          if (!availability) return 0;
-
-          const checkDateKey = getDateKey(checkDate);
-          const usedHours = schedule.dailyHoursUsed.get(checkDateKey) || 0;
-          return Math.max(0, availability.hoursAvailable - usedHours);
-        }
-      ).reduce((sum, hours) => sum + hours, 0);
-
-      // Moderate bonus for continuing on same line (if it has capacity)
-      if (totalCapacityLeft > 1) {
-        setupPenalty = -100; // Bonus for continuing on existing line
-      } else {
-        setupPenalty = 0; // No bonus if line is exhausted
-      }
-    } else if (existingLine && existingLine !== lineId && existingLineHasCapacity) {
-      // Small penalty for splitting across lines
-      setupPenalty = 50;
-    }
-
-    // Check if this line would need setup time (switching from different reference)
-    if (schedule.lastReferenceId && schedule.lastReferenceId !== referenceId) {
-      setupTime = getSetupTime(lineId, schedule.lastReferenceId, referenceId, state);
-      setupPenalty += setupTime * 10; // Penalize setup time
-    }
-
-    // Cost calculation: throughput is PRIMARY, then setup considerations
-    const cost = throughputScore + setupTime + setupPenalty;
-
-    // DEBUG: Log all candidate lines
-    const lineName = state.lines.find(l => l.id === lineId)?.name || lineId;
-    console.log(`  [CANDIDATE] ${lineName}: cost=${cost.toFixed(1)}, prodTime=${productionTime.toFixed(1)}, setup=${setupTime.toFixed(1)}, penalty=${setupPenalty.toFixed(1)}, throughputScore=${throughputScore.toFixed(1)}`);
-
-    if (!bestLine || cost < bestLine.cost) {
-      bestLine = { lineId, cost };
-    }
+    candidates.push({
+      lineId,
+      throughputRate: throughput.rate,
+      totalRemainingHours,
+      setupTime,
+    });
   }
 
-  return bestLine;
+  if (candidates.length === 0) {
+    console.log(`[SCHEDULER] FALLBACK: No compatible lines with capacity for ${refName}`);
+    return null;
+  }
+
+  // Sort candidates: highest throughput first, then lowest setup time, then most capacity
+  candidates.sort((a, b) => {
+    if (b.throughputRate !== a.throughputRate) {
+      return b.throughputRate - a.throughputRate;
+    }
+    if (a.setupTime !== b.setupTime) {
+      return a.setupTime - b.setupTime;
+    }
+    return b.totalRemainingHours - a.totalRemainingHours;
+  });
+
+  const selected = candidates[0];
+  const lineName = state.lines.find(l => l.id === selected.lineId)?.name || selected.lineId;
+  console.log(`[SCHEDULER] FALLBACK: Selected ${lineName} for ${refName} (throughput=${selected.throughputRate}, capacity=${selected.totalRemainingHours.toFixed(1)}h)`);
+
+  return selected.lineId;
 }
 
 function getSetupTime(
