@@ -44,6 +44,9 @@ interface AppContextType {
   deleteDemand: (index: number) => void;
   setPlanItems: (planItems: PlanItem[]) => void;
   setPlanWeek: (week: number) => void;
+  setPlanErrors: (errors: string[]) => void;
+  setPlanWarnings: (warnings: string[]) => void;
+  setWeekInput: (weekInput: string) => void;
   clearAll: () => void;
   exportData: () => string;
   importData: (jsonData: string) => void;
@@ -193,6 +196,18 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
     setState((prev) => ({ ...prev, planWeek: week }));
   };
 
+  const setPlanErrors = (errors: string[]) => {
+    setState((prev) => ({ ...prev, planErrors: errors }));
+  };
+
+  const setPlanWarnings = (warnings: string[]) => {
+    setState((prev) => ({ ...prev, planWarnings: warnings }));
+  };
+
+  const setWeekInput = (weekInput: string) => {
+    setState((prev) => ({ ...prev, weekInput }));
+  };
+
   const clearAll = () => {
     setState(initialState);
   };
@@ -233,6 +248,9 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
         deleteDemand,
         setPlanItems,
         setPlanWeek,
+        setPlanErrors,
+        setPlanWarnings,
+        setWeekInput,
         clearAll,
         exportData,
         importData,

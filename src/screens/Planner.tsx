@@ -3,11 +3,22 @@ import { useApp } from '../context/AppContext';
 import { generateProductionPlan } from '../utils/scheduler';
 
 export const Planner = () => {
-  const { state, addDemand, deleteDemand, setPlanItems, setPlanWeek } = useApp();
-  const [planErrors, setPlanErrors] = useState<string[]>([]);
-  const [planWarnings, setPlanWarnings] = useState<string[]>([]);
+  const {
+    state,
+    addDemand,
+    deleteDemand,
+    setPlanItems,
+    setPlanWeek,
+    setPlanErrors: setPlanErrorsGlobal,
+    setPlanWarnings: setPlanWarningsGlobal,
+    setWeekInput: setWeekInputGlobal
+  } = useApp();
   const [showDetailedPlan, setShowDetailedPlan] = useState(false);
-  const [weekNumber, setWeekNumber] = useState<string>('');
+
+  // Use global state for persistence
+  const planErrors = state.planErrors || [];
+  const planWarnings = state.planWarnings || [];
+  const weekNumber = state.weekInput || '';
   const [formData, setFormData] = useState({
     referenceId: '',
     quantity: '',
@@ -40,8 +51,8 @@ export const Planner = () => {
   };
 
   const handleGeneratePlan = () => {
-    setPlanErrors([]);
-    setPlanWarnings([]);
+    setPlanErrorsGlobal([]);
+    setPlanWarningsGlobal([]);
 
     // Validate week number
     if (!weekNumber || weekNumber.trim() === '') {
@@ -58,11 +69,11 @@ export const Planner = () => {
     const result = generateProductionPlan(state, week);
 
     if (result.errors.length > 0) {
-      setPlanErrors(result.errors);
+      setPlanErrorsGlobal(result.errors);
     }
 
     if (result.warnings.length > 0) {
-      setPlanWarnings(result.warnings);
+      setPlanWarningsGlobal(result.warnings);
     }
 
     if (result.planItems.length > 0) {
@@ -279,7 +290,7 @@ export const Planner = () => {
                 <input
                   type="number"
                   value={weekNumber}
-                  onChange={(e) => setWeekNumber(e.target.value)}
+                  onChange={(e) => setWeekInputGlobal(e.target.value)}
                   placeholder="e.g., 1"
                   className="w-24 px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-green-500"
                 />
@@ -592,18 +603,22 @@ export const Planner = () => {
 
                   if (linePlanItems.length === 0) return null;
 
-                  // Get unique dates sorted by EU week order
-                  const uniqueDates = Array.from(new Set(linePlanItems.map((p) => p.date)))
-                    .sort((a, b) => {
-                      const dateObjA = new Date(a);
-                      const dateObjB = new Date(b);
-                      const jsDayA = dateObjA.getDay();
-                      const jsDayB = dateObjB.getDay();
-                      const euDayA = jsDayA === 0 ? 6 : jsDayA - 1;
-                      const euDayB = jsDayB === 0 ? 6 : jsDayB - 1;
-                      if (euDayA !== euDayB) return euDayA - euDayB;
-                      return a.localeCompare(b);
-                    });
+                  // Get ALL dates for the week (Mon-Sun), not just dates with production
+                  const allPlanDates = state.planItems.map((p) => p.date);
+                  if (allPlanDates.length === 0) return null;
+
+                  // Find the earliest and latest dates to determine the week range
+                  const sortedDates = [...allPlanDates].sort();
+                  const firstDate = new Date(sortedDates[0]);
+
+                  // Generate all 7 days of the week (Mon-Sun)
+                  const allWeekDates: string[] = [];
+                  for (let i = 0; i < 7; i++) {
+                    const date = new Date(firstDate);
+                    date.setDate(firstDate.getDate() + i);
+                    const dateKey = date.toISOString().split('T')[0];
+                    allWeekDates.push(dateKey);
+                  }
 
                   // Get unique references that appear on this line
                   const lineReferences = Array.from(
@@ -628,7 +643,7 @@ export const Planner = () => {
                               <th className="px-4 py-2 text-left font-semibold text-gray-700 border-b border-r">
                                 Reference
                               </th>
-                              {uniqueDates.map((date) => {
+                              {allWeekDates.map((date) => {
                                 const dateObj = new Date(date);
                                 const jsDayOfWeek = dateObj.getDay();
                                 const dayOfWeek = jsDayOfWeek === 0 ? 6 : jsDayOfWeek - 1;
@@ -652,7 +667,7 @@ export const Planner = () => {
                                   <td className="px-4 py-2 font-medium text-gray-900 border-r bg-gray-50">
                                     {refName}
                                   </td>
-                                  {uniqueDates.map((date) => {
+                                  {allWeekDates.map((date) => {
                                     const quantity = linePlanItems
                                       .filter((p) => p.date === date && p.referenceId === refId)
                                       .reduce((sum, p) => sum + p.quantity, 0);

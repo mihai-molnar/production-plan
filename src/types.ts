@@ -53,4 +53,7 @@ export interface AppState {
   demands: Demand[];
   planItems: PlanItem[];
   planWeek?: number; // Week number for the current plan
+  planErrors?: string[]; // Planning errors
+  planWarnings?: string[]; // Planning warnings
+  weekInput?: string; // Week number input value
 }
